@@ -357,8 +357,8 @@ class _LinkDialogState extends State<LinkDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final headers1 = _file1 != null ? (widget.headers[_file1] ?? []) : [];
-    final headers2 = _file2 != null ? (widget.headers[_file2] ?? []) : [];
+    final List<String> headers1 = _file1 != null ? (widget.headers[_file1] ?? []) : [];
+    final List<String> headers2 = _file2 != null ? (widget.headers[_file2] ?? []) : [];
 
     return AlertDialog(
       title: const Text('添加关联'),
