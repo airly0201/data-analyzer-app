@@ -1,28 +1,22 @@
 name: data_analyzer
-description: "数据关联分析平台 - 多表Inner Join查询"
+description: "数据关联分析平台"
 publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.11.3
+  sdk: ^3.5.0
 
 dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  # 文件选择
-  file_picker: ^8.0.0+1
-  # Excel处理
-  excel: ^4.0.6
-  # 本地存储
-  shared_preferences: ^2.2.2
-  # 路径处理
-  path_provider: ^2.1.2
+  file_picker: ^6.1.1
+  csv: ^6.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
+  flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
