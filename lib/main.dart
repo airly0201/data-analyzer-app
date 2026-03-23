@@ -1,9 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:csv/csv.dart';
 import 'dart:io';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // 请求存储权限 (Android)
+  if (Platform.isAndroid) {
+    try {
+      // 尝试请求存储权限
+      const methodChannel = MethodChannel('com.example.data_analyzer/permissions');
+      await methodChannel.invokeMethod('requestStoragePermission');
+    } catch (e) {
+      // 权限请求失败忽略，继续尝试
+    }
+  }
+  
   runApp(const DataAnalyzerApp());
 }
 
