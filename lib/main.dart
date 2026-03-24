@@ -1,23 +1,12 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:csv/csv.dart';
+import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:excel/excel.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  // 请求存储权限 (Android)
-  if (Platform.isAndroid) {
-    try {
-      // 尝试请求存储权限
-      const methodChannel = MethodChannel('com.example.data_analyzer/permissions');
-      await methodChannel.invokeMethod('requestStoragePermission');
-    } catch (e) {
-      // 权限请求失败忽略，继续尝试
-    }
-  }
-  
+void main() {
   runApp(const DataAnalyzerApp());
 }
 
@@ -28,9 +17,46 @@ class DataAnalyzerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '数据关联分析',
-      theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        useMaterial3: true,
+      ),
       home: const HomePage(),
     );
+  }
+}
+
+// 全局状态
+class AppState {
+  String folderPath = '';
+  List<String> files = [];
+  Map<String, List<String>> tables = {}; // 文件 -> 表名列表
+  List<Map<String, String>> links = []; // 关联配置
+  Map<String, List<String>> outputFields = {}; // 输出字段
+  Map<String, dynamic>? queryResult;
+  String? selectedConfig;
+  String status = '请选择数据目录';
+
+  Map<String, dynamic> toJson() => {
+    'folderPath': folderPath,
+    'files': files,
+    'tables': tables,
+    'links': links,
+    'outputFields': outputFields,
+    'selectedConfig': selectedConfig,
+  };
+
+  fromJson(Map<String, dynamic> json) {
+    folderPath = json['folderPath'] ?? '';
+    files = List<String>.from(json['files'] ?? []);
+    tables = (json['tables'] as Map<String, dynamic>?)?.map(
+      (k, v) => MapEntry(k, List<String>.from(v)),
+    ) ?? {};
+    links = (json['links'] as List?)?.cast<Map<String, String>>() ?? [];
+    outputFields = (json['outputFields'] as Map<String, dynamic>?)?.map(
+      (k, v) => MapEntry(k, List<String>.from(v)),
+    ) ?? {};
+    selectedConfig = json['selectedConfig'];
   }
 }
 
@@ -42,35 +68,57 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  String _status = '请选择CSV文件';
-  List<String> _files = [];
-  Map<String, List<String>> _headers = {};  // file -> headers
-  Map<String, List<List<dynamic>>> _data = {};  // file -> rows
-  List<Map<String, String>> _links = [];
-  List<Map<String, dynamic>>? _queryResult;
-  bool _loading = false;
+  final AppState _state = AppState();
+  bool _isLoading = false;
 
-  void _updateStatus(String msg) {
-    setState(() => _status = msg);
+  @override
+  void initState() {
+    super.initState();
+    _loadConfig();
   }
 
-  Future<void> _selectFiles() async {
+  // 加载配置
+  Future<void> _loadConfig() async {
+    final prefs = await SharedPreferences.getInstance();
+    final configs = prefs.getString('configs');
+    if (configs != null) {
+      final configMap = jsonDecode(configs) as Map<String, dynamic>;
+      if (configMap.isNotEmpty) {
+        final configName = configMap.keys.first;
+        _state.fromJson(configMap[configName]);
+        _state.selectedConfig = configName;
+        setState(() {});
+        _updateStatus('已加载配置: $configName');
+      }
+    }
+  }
+
+  // 保存配置
+  Future<void> _saveConfig(String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    final configs = prefs.getString('configs');
+    final configMap = configs != null 
+      ? jsonDecode(configs) as Map<String, dynamic>
+      : <String, dynamic>{};
+    
+    configMap[name] = _state.toJson();
+    await prefs.setString('configs', jsonEncode(configMap));
+    _updateStatus('配置已保存: $name');
+  }
+
+  void _updateStatus(String msg) {
+    setState(() {
+      _state.status = msg;
+    });
+  }
+
+  // 选择目录
+  Future<void> _selectFolder() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-        allowMultiple: true,
-      );
-      
-      if (result != null && result.files.isNotEmpty) {
-        _files = result.files.where((f) => f.path != null).map((f) => f.path!).toList();
-        
-        if (_files.isEmpty) {
-          _updateStatus('无法访问文件路径');
-          return;
-        }
-        
-        _updateStatus('已选择 ${_files.length} 个文件');
+      final result = await FilePicker.platform.getDirectoryPath();
+      if (result != null) {
+        _state.folderPath = result;
+        _updateStatus('已选择: $result');
         await _scanFiles();
       }
     } catch (e) {
@@ -78,39 +126,44 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // 扫描文件
   Future<void> _scanFiles() async {
-    if (_files.isEmpty) return;
-    
-    setState(() => _loading = true);
+    setState(() => _isLoading = true);
     _updateStatus('扫描中...');
     
-    _headers = {};
-    _data = {};
-
-    for (final filePath in _files) {
-      try {
-        final file = File(filePath);
-        final content = await file.readAsString();
-        final rows = const CsvToListConverter().convert(content);
-        
-        if (rows.isNotEmpty) {
-          _headers[filePath] = rows.first.map((e) => e.toString()).toList();
-          _data[filePath] = rows;
+    try {
+      final dir = Directory(_state.folderPath);
+      final files = await dir.list().toList();
+      
+      _state.files = files
+          .where((f) => f.path.endsWith('.xlsx') || f.path.endsWith('.xls'))
+          .map((f) => f.path)
+          .toList();
+      
+      // 扫描每个文件的表
+      _state.tables = {};
+      for (final filePath in _state.files) {
+        try {
+          final file = File(filePath);
+          final bytes = await file.readAsBytes();
+          final excel = Excel.decodeBytes(bytes);
+          _state.tables[filePath] = excel.tables.keys.toList();
+        } catch (e) {
+          _state.tables[filePath] = [];
         }
-      } catch (e) {
-        _headers[filePath] = [];
-        _data[filePath] = [];
       }
+      
+      _updateStatus('找到 ${_state.files.length} 个Excel文件');
+    } catch (e) {
+      _updateStatus('扫描失败: $e');
     }
-
-    setState(() {
-      _loading = false;
-      _status = '找到 ${_files.length} 个CSV文件';
-    });
+    
+    setState(() => _isLoading = false);
   }
 
+  // 添加关联
   void _addLink() {
-    if (_files.length < 2) {
+    if (_state.files.length < 2) {
       _updateStatus('需要至少2个文件');
       return;
     }
@@ -118,73 +171,75 @@ class _HomePageState extends State<HomePage> {
     showDialog(
       context: context,
       builder: (ctx) => LinkDialog(
-        files: _files,
-        headers: _headers,
+        files: _state.files,
+        tables: _state.tables,
         onAdd: (link) {
-          setState(() => _links.add(link));
-          _updateStatus('已添加关联 (${_links.length})');
+          setState(() {
+            _state.links.add(link);
+          });
+          _updateStatus('已添加关联');
         },
       ),
     );
   }
 
+  // 执行查询
   Future<void> _executeQuery() async {
-    if (_links.isEmpty) {
+    if (_state.links.isEmpty) {
       _updateStatus('请先添加关联');
       return;
     }
 
-    setState(() {
-      _loading = true;
-      _status = '查询中...';
-    });
+    setState(() => _isLoading = true);
+    _updateStatus('查询执行中...');
 
     try {
-      List<Map<String, dynamic>> result = [];
+      // 简化版：只做第一个关联
+      final link = _state.links.first;
+      final file1 = link['file1']!;
+      final table1 = link['table1']!;
+      final file2 = link['file2']!;
+      final table2 = link['table2']!;
+      final key1 = link['key1']!;
+      final key2 = link['key2']!;
+
+      // 读取数据
+      final data1 = await _readExcel(file1, table1);
+      final data2 = await _readExcel(file2, table2);
+
+      // 执行Inner Join
+      final result = _innerJoin(data1, key1, data2, key2);
       
-      for (final link in _links) {
-        final file1 = link['file1']!;
-        final file2 = link['file2']!;
-        final key1 = link['key1']!;
-        final key2 = link['key2']!;
-        
-        final data1 = _parseData(file1);
-        final data2 = _parseData(file2);
-        
-        final joined = _innerJoin(data1, key1, data2, key2);
-        
-        if (result.isEmpty) {
-          result = joined;
-        } else if (joined.isNotEmpty) {
-          // 多重关联
-          final lastLink = _links.last;
-          result = _innerJoin(result, lastLink['key2']!, joined, key1);
-        }
-      }
+      _state.queryResult = {
+        'rows': result,
+        'count': result.length,
+      };
       
-      setState(() {
-        _queryResult = result;
-        _status = '查询完成: ${result.length} 条记录';
-      });
+      _updateStatus('查询完成: ${result.length} 条记录');
     } catch (e) {
       _updateStatus('查询失败: $e');
     }
 
-    setState(() => _loading = false);
+    setState(() => _isLoading = false);
   }
 
-  List<Map<String, dynamic>> _parseData(String filePath) {
-    final rows = _data[filePath];
-    if (rows == null || rows.isEmpty) return [];
+  // 读取Excel
+  Future<List<Map<String, dynamic>>> _readExcel(String filePath, String tableName) async {
+    final file = File(filePath);
+    final bytes = await file.readAsBytes();
+    final excel = Excel.decodeBytes(bytes);
+    final sheet = excel.tables[tableName];
     
-    final headers = _headers[filePath] ?? [];
+    if (sheet == null) return [];
+    
     final result = <Map<String, dynamic>>[];
+    final headers = sheet.rows.first.map((c) => c?.value?.toString() ?? '').toList();
     
-    for (var i = 1; i < rows.length; i++) {
-      final row = rows[i];
+    for (var i = 1; i < sheet.rows.length; i++) {
+      final row = sheet.rows[i];
       final map = <String, dynamic>{};
       for (var j = 0; j < headers.length; j++) {
-        map[headers[j]] = j < row.length ? row[j].toString() : '';
+        map[headers[j]] = j < row.length ? row[j]?.value?.toString() : '';
       }
       result.add(map);
     }
@@ -192,41 +247,72 @@ class _HomePageState extends State<HomePage> {
     return result;
   }
 
+  // Inner Join
   List<Map<String, dynamic>> _innerJoin(
     List<Map<String, dynamic>> data1, String key1,
     List<Map<String, dynamic>> data2, String key2,
   ) {
     final result = <Map<String, dynamic>>[];
+    
     for (final row1 in data1) {
       for (final row2 in data2) {
-        if (row1[key1]?.toString().trim() == row2[key2]?.toString().trim()) {
+        if (row1[key1]?.toString() == row2[key2]?.toString()) {
           result.add({...row1, ...row2});
         }
       }
     }
+    
     return result;
   }
 
-  void _previewResult() {
-    if (_queryResult == null || _queryResult!.isEmpty) {
+  // 导出Excel
+  Future<void> _exportExcel() async {
+    if (_state.queryResult == null) {
       _updateStatus('没有查询结果');
       return;
     }
-    showDialog(
-      context: context,
-      builder: (ctx) => ResultDialog(result: _queryResult!),
-    );
-  }
 
-  void _clearAll() {
-    setState(() {
-      _files = [];
-      _headers = {};
-      _data = {};
-      _links = [];
-      _queryResult = null;
-      _status = '已清空';
-    });
+    setState(() => _isLoading = true);
+
+    try {
+      final excel = Excel.createExcel();
+      final sheet = excel['Sheet1'];
+      
+      final rows = _state.queryResult!['rows'] as List<Map<String, dynamic>>;
+      if (rows.isEmpty) {
+        _updateStatus('没有数据');
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // 写入表头
+      final headers = rows.first.keys.toList();
+      for (var i = 0; i < headers.length; i++) {
+        sheet.cell(CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0)).value = TextCellValue(headers[i]);
+      }
+
+      // 写入数据
+      for (var r = 0; r < rows.length; r++) {
+        final row = rows[r];
+        for (var c = 0; c < headers.length; c++) {
+          sheet.cell(CellIndex.indexByColumnRow(columnIndex: c, rowIndex: r + 1)).value = 
+            TextCellValue(row[headers[c]]?.toString() ?? '');
+        }
+      }
+
+      // 保存
+      final outputDir = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final outputPath = '${outputDir.path}/result_$timestamp.xlsx';
+      final file = File(outputPath);
+      await file.writeAsBytes(excel.encode()!);
+
+      _updateStatus('已导出: $outputPath');
+    } catch (e) {
+      _updateStatus('导出失败: $e');
+    }
+
+    setState(() => _isLoading = false);
   }
 
   @override
@@ -235,191 +321,226 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('数据关联分析'),
         actions: [
-          IconButton(icon: const Icon(Icons.delete_outline), onPressed: _clearAll, tooltip: '清空'),
+          IconButton(
+            icon: const Icon(Icons.save),
+            onPressed: () => _showSaveDialog(),
+            tooltip: '保存配置',
+          ),
+          IconButton(
+            icon: const Icon(Icons.folder_open),
+            onPressed: _loadConfig,
+            tooltip: '加载配置',
+          ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    color: Colors.blue.shade50,
-                    child: Text(_status),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: _selectFiles,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text('选择CSV文件'),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_files.isNotEmpty) ...[
-                    const Text('📁 文件列表:', style: TextStyle(fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    ..._files.asMap().entries.map((e) {
-                      final file = e.value;
-                      final name = file.split('/').last;
-                      final hdrs = _headers[file] ?? [];
-                      return Card(
-                        child: ListTile(
-                          leading: const Icon(Icons.description),
-                          title: Text(name),
-                          subtitle: Text('字段: ${hdrs.take(5).join(", ")}${hdrs.length > 5 ? "..." : ""}'),
-                          dense: true,
-                        ),
-                      );
-                    }),
-                    const SizedBox(height: 16),
-                  ],
-                  ElevatedButton.icon(
-                    onPressed: _files.length >= 2 ? _addLink : null,
-                    icon: const Icon(Icons.link),
-                    label: Text('添加关联 (${_links.length})'),
-                  ),
-                  const SizedBox(height: 8),
-                  if (_links.isNotEmpty) ...[
-                    const Text('🔗 关联配置:', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ..._links.asMap().entries.map((e) {
-                      final link = e.value;
-                      final f1 = link['file1']!.split('/').last;
-                      final f2 = link['file2']!.split('/').last;
-                      return Card(
-                        child: ListTile(
-                          leading: const Icon(Icons.link),
-                          title: Text('$f1 [${link['key1']}] = $f2 [${link['key2']}]'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete),
-                            onPressed: () => setState(() => _links.removeAt(e.key)),
-                          ),
-                          dense: true,
-                        ),
-                      );
-                    }),
-                    const SizedBox(height: 16),
-                  ],
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _links.isNotEmpty ? _executeQuery : null,
-                          icon: const Icon(Icons.play_arrow),
-                          label: const Text('执行查询'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _queryResult != null ? _previewResult : null,
-                          icon: const Icon(Icons.visibility),
-                          label: Text('预览${_queryResult != null ? "(${_queryResult!.length})" : ""}'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    color: Colors.grey.shade100,
-                    child: const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('📖 使用说明:', style: TextStyle(fontWeight: FontWeight.bold)),
-                        SizedBox(height: 8),
-                        Text('1. 选择CSV文件（支持多选）'),
-                        Text('2. 点击"添加关联"选择两个文件的关联字段'),
-                        Text('3. 点击"执行查询"进行Inner Join'),
-                        Text('4. 点击"预览"查看结果'),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 状态显示
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: Colors.blue.shade50,
+              child: Text(_state.status, style: const TextStyle(fontSize: 14)),
             ),
+            const SizedBox(height: 16),
+            
+            // 功能按钮
+            ElevatedButton.icon(
+              onPressed: _selectFolder,
+              icon: const Icon(Icons.folder),
+              label: const Text('选择数据目录'),
+            ),
+            const SizedBox(height: 8),
+            
+            ElevatedButton.icon(
+              onPressed: _state.files.isNotEmpty ? _scanFiles : null,
+              icon: const Icon(Icons.search),
+              label: const Text('扫描文件'),
+            ),
+            const SizedBox(height: 8),
+            
+            ElevatedButton.icon(
+              onPressed: _state.files.length >= 2 ? _addLink : null,
+              icon: const Icon(Icons.link),
+              label: const Text('添加关联'),
+            ),
+            const SizedBox(height: 8),
+            
+            ElevatedButton.icon(
+              onPressed: _state.links.isNotEmpty ? _executeQuery : null,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('执行查询'),
+            ),
+            const SizedBox(height: 8),
+            
+            ElevatedButton.icon(
+              onPressed: _state.queryResult != null ? _exportExcel : null,
+              icon: const Icon(Icons.download),
+              label: const Text('导出Excel'),
+            ),
+            const SizedBox(height: 16),
+
+            // 文件列表
+            if (_state.files.isNotEmpty) ...[
+              const Text('文件列表:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _state.files.length,
+                  itemBuilder: (ctx, i) {
+                    final fileName = _state.files[i].split('/').last;
+                    return ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.description),
+                      title: Text(fileName),
+                      subtitle: Text('表: ${_state.tables[_state.files[i]]?.join(", ") ?? "无"}'),
+                    );
+                  },
+                ),
+              ),
+            ],
+
+            // 关联列表
+            if (_state.links.isNotEmpty) ...[
+              const Text('关联配置:', style: TextStyle(fontWeight: FontWeight.bold)),
+              ..._state.links.asMap().entries.map((e) => ListTile(
+                dense: true,
+                leading: const Icon(Icons.link),
+                title: Text('${e.value['file1']?.split('/').last}.${e.value['table1']} [${e.value['key1']}] = ${e.value['file2']?.split('/').last}.${e.value['table2']} [${e.value['key2']}]'),
+              )),
+            ],
+
+            // 结果统计
+            if (_state.queryResult != null)
+              Text('结果: ${_state.queryResult!['count']} 条记录',
+                style: TextStyle(color: Colors.green.shade700, fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSaveDialog() {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('保存配置'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: '配置名称'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+            onPressed: () {
+              if (controller.text.isNotEmpty) {
+                _saveConfig(controller.text);
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
     );
   }
 }
 
-// 关联配置对话框 - 让用户选择字段
+// 关联配置对话框
 class LinkDialog extends StatefulWidget {
   final List<String> files;
-  final Map<String, List<String>> headers;
+  final Map<String, List<String>> tables;
   final Function(Map<String, String>) onAdd;
 
-  const LinkDialog({super.key, required this.files, required this.headers, required this.onAdd});
+  const LinkDialog({super.key, required this.files, required this.tables, required this.onAdd});
 
   @override
   State<LinkDialog> createState() => _LinkDialogState();
 }
 
 class _LinkDialogState extends State<LinkDialog> {
-  String? _file1;
-  String? _file2;
-  String? _key1;
-  String? _key2;
+  String? file1, file2;
+  String? table1, table2;
+  String? key1, key2;
 
   @override
   Widget build(BuildContext context) {
-    final List<String> headers1 = _file1 != null ? (widget.headers[_file1] ?? []) : [];
-    final List<String> headers2 = _file2 != null ? (widget.headers[_file2] ?? []) : [];
-
     return AlertDialog(
       title: const Text('添加关联'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 文件1选择
+            // 文件1
             DropdownButtonFormField<String>(
               decoration: const InputDecoration(labelText: '文件1'),
-              value: _file1,
+              value: file1,
               items: widget.files.map((f) => DropdownMenuItem(
-                value: f, 
-                child: Text(f.split('/').last, overflow: TextOverflow.ellipsis),
+                value: f, child: Text(f.split('/').last),
               )).toList(),
-              onChanged: (v) => setState(() { _file1 = v; _key1 = null; }),
+              onChanged: (v) => setState(() {
+                file1 = v;
+                table1 = null;
+                key1 = null;
+              }),
             ),
-            // 文件1的字段选择
-            if (_file1 != null && headers1.isNotEmpty)
+            // 表1
+            if (file1 != null)
               DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: '关联字段1'),
-                value: _key1,
-                items: headers1.map((h) => DropdownMenuItem(value: h, child: Text(h))).toList(),
-                onChanged: (v) => setState(() => _key1 = v),
+                decoration: const InputDecoration(labelText: '表1'),
+                value: table1,
+                items: (widget.tables[file1] ?? []).map((t) => DropdownMenuItem(
+                  value: t, child: Text(t),
+                )).toList(),
+                onChanged: (v) => setState(() {
+                  table1 = v;
+                  key1 = null;
+                }),
               ),
-            
-            const SizedBox(height: 12),
-            const Center(child: Text('=', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
-            const SizedBox(height: 12),
-            
-            // 文件2选择
+            // 字段1
+            if (table1 != null)
+              TextField(
+                decoration: const InputDecoration(labelText: '关联字段1'),
+                onChanged: (v) => key1 = v,
+              ),
+            const SizedBox(height: 16),
+            const Text('=', style: TextStyle(fontSize: 24)),
+            const SizedBox(height: 16),
+            // 文件2
             DropdownButtonFormField<String>(
               decoration: const InputDecoration(labelText: '文件2'),
-              value: _file2,
+              value: file2,
               items: widget.files.map((f) => DropdownMenuItem(
-                value: f, 
-                child: Text(f.split('/').last, overflow: TextOverflow.ellipsis),
+                value: f, child: Text(f.split('/').last),
               )).toList(),
-              onChanged: (v) => setState(() { _file2 = v; _key2 = null; }),
+              onChanged: (v) => setState(() {
+                file2 = v;
+                table2 = null;
+                key2 = null;
+              }),
             ),
-            // 文件2的字段选择
-            if (_file2 != null && headers2.isNotEmpty)
+            // 表2
+            if (file2 != null)
               DropdownButtonFormField<String>(
+                decoration: const InputDecoration(labelText: '表2'),
+                value: table2,
+                items: (widget.tables[file2] ?? []).map((t) => DropdownMenuItem(
+                  value: t, child: Text(t),
+                )).toList(),
+                onChanged: (v) => setState(() {
+                  table2 = v;
+                  key2 = null;
+                }),
+              ),
+            // 字段2
+            if (table2 != null)
+              TextField(
                 decoration: const InputDecoration(labelText: '关联字段2'),
-                value: _key2,
-                items: headers2.map((h) => DropdownMenuItem(value: h, child: Text(h))).toList(),
-                onChanged: (v) => setState(() => _key2 = v),
+                onChanged: (v) => key2 = v,
               ),
           ],
         ),
@@ -428,12 +549,10 @@ class _LinkDialogState extends State<LinkDialog> {
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
         TextButton(
           onPressed: () {
-            if (_file1 != null && _file2 != null && _key1 != null && _key2 != null) {
+            if (file1 != null && file2 != null && table1 != null && table2 != null && key1 != null && key2 != null) {
               widget.onAdd({
-                'file1': _file1!, 
-                'key1': _key1!,
-                'file2': _file2!, 
-                'key2': _key2!,
+                'file1': file1!, 'table1': table1!, 'key1': key1!,
+                'file2': file2!, 'table2': table2!, 'key2': key2!,
               });
               Navigator.pop(context);
             }
@@ -441,65 +560,6 @@ class _LinkDialogState extends State<LinkDialog> {
           child: const Text('添加'),
         ),
       ],
-    );
-  }
-}
-
-// 结果预览对话框
-class ResultDialog extends StatelessWidget {
-  final List<Map<String, dynamic>> result;
-
-  const ResultDialog({super.key, required this.result});
-
-  @override
-  Widget build(BuildContext context) {
-    if (result.isEmpty) {
-      return const AlertDialog(title: Text('结果'), content: Text('无数据'));
-    }
-
-    final headers = result.first.keys.toList();
-
-    return Dialog(
-      child: Container(
-        width: MediaQuery.of(context).size.width * 0.95,
-        height: MediaQuery.of(context).size.height * 0.7,
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Text('结果 (${result.length}条)', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Expanded(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SingleChildScrollView(
-                  child: Table(
-                    border: TableBorder.all(color: Colors.grey),
-                    defaultColumnWidth: const FixedColumnWidth(100),
-                    children: [
-                      // 表头
-                      TableRow(
-                        children: headers.map((h) => Container(
-                          padding: const EdgeInsets.all(8),
-                          color: Colors.grey.shade200,
-                          child: Text(h, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        )).toList(),
-                      ),
-                      // 数据行（最多显示50条）
-                      ...result.take(50).map((row) => TableRow(
-                        children: headers.map((h) => Container(
-                          padding: const EdgeInsets.all(8),
-                          child: Text(row[h]?.toString() ?? '', overflow: TextOverflow.ellipsis),
-                        )).toList(),
-                      )),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
-          ],
-        ),
-      ),
     );
   }
 }
