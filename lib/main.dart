@@ -113,51 +113,72 @@ class _HomePageState extends State<HomePage> {
   }
 
   // 选择目录
+  // 选择文件（直接选择Excel文件，不扫描目录）
   Future<void> _selectFolder() async {
     try {
-      final result = await FilePicker.platform.getDirectoryPath();
-      if (result != null) {
-        _state.folderPath = result;
-        _updateStatus('已选择: $result');
-        await _scanFiles();
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'xls'],
+        allowMultiple: true,
+      );
+      
+      if (result != null && result.files.isNotEmpty) {
+        // 获取文件路径
+        final validFiles = result.files.where((f) => f.path != null).map((f) => f.path!).toList();
+        
+        if (validFiles.isEmpty) {
+          _updateStatus('无法访问文件路径，请授予存储权限');
+          return;
+        }
+        
+        _state.files = validFiles;
+        _state.folderPath = '已选择文件';
+        _updateStatus('已选择 ${_state.files.length} 个文件');
+        
+        // 扫描每个文件的表
+        await _scanTables();
       }
     } catch (e) {
       _updateStatus('选择失败: $e');
     }
   }
 
-  // 扫描文件
-  Future<void> _scanFiles() async {
+  // 扫描文件表头
+  Future<void> _scanTables() async {
     setState(() => _isLoading = true);
     _updateStatus('扫描中...');
     
-    try {
-      final dir = Directory(_state.folderPath);
-      final files = await dir.list().toList();
-      
-      _state.files = files
-          .where((f) => f.path.endsWith('.xlsx') || f.path.endsWith('.xls'))
-          .map((f) => f.path)
-          .toList();
-      
-      // 扫描每个文件的表
-      _state.tables = {};
-      for (final filePath in _state.files) {
-        try {
-          final file = File(filePath);
-          final bytes = await file.readAsBytes();
-          final excel = Excel.decodeBytes(bytes);
-          _state.tables[filePath] = excel.tables.keys.toList();
-        } catch (e) {
-          _state.tables[filePath] = [];
+    _state.tables = {};
+    
+    for (final filePath in _state.files) {
+      try {
+        final file = File(filePath);
+        final bytes = await file.readAsBytes();
+        final excel = Excel.decodeBytes(bytes);
+        
+        // 获取第一个sheet的表头
+        final tables = excel.tables.keys.toList();
+        _state.tables[filePath] = tables;
+        
+        // 尝试读取表头字段
+        if (tables.isNotEmpty) {
+          final sheet = excel.tables[tables.first];
+          if (sheet != null && sheet.rows.isNotEmpty) {
+            final headers = sheet.rows.first
+                .map((c) => c?.value?.toString() ?? '')
+                .where((s) => s.isNotEmpty)
+                .toList();
+            // 保存到outputFields作为字段列表
+            _state.outputFields[filePath] = headers;
+          }
         }
+      } catch (e) {
+        _state.tables[filePath] = [];
+        _state.outputFields[filePath] = [];
       }
-      
-      _updateStatus('找到 ${_state.files.length} 个Excel文件');
-    } catch (e) {
-      _updateStatus('扫描失败: $e');
     }
     
+    _updateStatus('找到 ${_state.files.length} 个Excel文件');
     setState(() => _isLoading = false);
   }
 
@@ -173,6 +194,7 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => LinkDialog(
         files: _state.files,
         tables: _state.tables,
+        headers: _state.outputFields,
         onAdd: (link) {
           setState(() {
             _state.links.add(link);
@@ -450,13 +472,20 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-// 关联配置对话框
+// 关联配置对话框 - 让用户选择字段
 class LinkDialog extends StatefulWidget {
   final List<String> files;
   final Map<String, List<String>> tables;
+  final Map<String, List<String>> headers;  // 文件 -> 字段列表
   final Function(Map<String, String>) onAdd;
 
-  const LinkDialog({super.key, required this.files, required this.tables, required this.onAdd});
+  const LinkDialog({
+    super.key, 
+    required this.files, 
+    required this.tables, 
+    required this.headers,
+    required this.onAdd
+  });
 
   @override
   State<LinkDialog> createState() => _LinkDialogState();
@@ -469,6 +498,9 @@ class _LinkDialogState extends State<LinkDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final fields1 = file1 != null ? (widget.headers[file1] ?? []) : [];
+    final fields2 = file2 != null ? (widget.headers[file2] ?? []) : [];
+
     return AlertDialog(
       title: const Text('添加关联'),
       content: SingleChildScrollView(
@@ -488,27 +520,23 @@ class _LinkDialogState extends State<LinkDialog> {
                 key1 = null;
               }),
             ),
-            // 表1
-            if (file1 != null)
+            // 字段1 - 下拉选择
+            if (file1 != null && fields1.isNotEmpty)
               DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: '表1'),
-                value: table1,
-                items: (widget.tables[file1] ?? []).map((t) => DropdownMenuItem(
-                  value: t, child: Text(t),
-                )).toList(),
-                onChanged: (v) => setState(() {
-                  table1 = v;
-                  key1 = null;
-                }),
-              ),
-            // 字段1
-            if (table1 != null)
-              TextField(
                 decoration: const InputDecoration(labelText: '关联字段1'),
-                onChanged: (v) => key1 = v,
+                value: key1,
+                items: fields1.map((h) => DropdownMenuItem(
+                  value: h, child: Text(h),
+                )).toList(),
+                onChanged: (v) => setState(() => key1 = v),
+              ),
+            if (file1 != null && fields1.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(8.0),
+                child: Text('无法读取字段', style: TextStyle(color: Colors.red)),
               ),
             const SizedBox(height: 16),
-            const Text('=', style: TextStyle(fontSize: 24)),
+            const Center(child: Text('=', style: TextStyle(fontSize: 24))),
             const SizedBox(height: 16),
             // 文件2
             DropdownButtonFormField<String>(
@@ -519,28 +547,23 @@ class _LinkDialogState extends State<LinkDialog> {
               )).toList(),
               onChanged: (v) => setState(() {
                 file2 = v;
-                table2 = null;
                 key2 = null;
               }),
             ),
-            // 表2
-            if (file2 != null)
+            // 字段2 - 下拉选择
+            if (file2 != null && fields2.isNotEmpty)
               DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: '表2'),
-                value: table2,
-                items: (widget.tables[file2] ?? []).map((t) => DropdownMenuItem(
-                  value: t, child: Text(t),
-                )).toList(),
-                onChanged: (v) => setState(() {
-                  table2 = v;
-                  key2 = null;
-                }),
-              ),
-            // 字段2
-            if (table2 != null)
-              TextField(
                 decoration: const InputDecoration(labelText: '关联字段2'),
-                onChanged: (v) => key2 = v,
+                value: key2,
+                items: fields2.map((h) => DropdownMenuItem(
+                  value: h, child: Text(h),
+                )).toList(),
+                onChanged: (v) => setState(() => key2 = v),
+              ),
+            if (file2 != null && fields2.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(8.0),
+                child: Text('无法读取字段', style: TextStyle(color: Colors.red)),
               ),
           ],
         ),
