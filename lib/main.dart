@@ -527,17 +527,24 @@ class _LinkDialogState extends State<LinkDialog> {
                 key1 = null;
               }),
             ),
-            // 选择Sheet1
-            if (file1 != null && sheets1.isNotEmpty)
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Sheet1'),
-                value: table1,
-                items: sheets1.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-                onChanged: (v) => setState(() {
-                  table1 = v;
-                  key1 = null;
-                }),
-              ),
+            // 选择Sheet1 - 始终显示（如果选择了文件）
+            if (file1 != null) ...[
+              if (sheets1.isNotEmpty)
+                DropdownButtonFormField<String>(
+                  decoration: const InputDecoration(labelText: 'Sheet1'),
+                  value: table1,
+                  items: sheets1.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                  onChanged: (v) => setState(() {
+                    table1 = v;
+                    key1 = null;
+                  }),
+                )
+              else
+                const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text('⚠️ 请重新选择文件', style: TextStyle(color: Colors.red)),
+                ),
+            ],
             // 选择字段1
             if (file1 != null && table1 != null && fields1.isNotEmpty)
               DropdownButtonFormField<String>(
@@ -547,11 +554,6 @@ class _LinkDialogState extends State<LinkDialog> {
                   value: h, child: Text(h, overflow: TextOverflow.ellipsis),
                 )).toList(),
                 onChanged: (v) => setState(() => key1 = v),
-              ),
-            if (file1 != null && table1 != null && fields1.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(8.0),
-                child: Text('该Sheet无字段', style: TextStyle(color: Colors.orange)),
               ),
             
             const SizedBox(height: 12),
@@ -571,17 +573,24 @@ class _LinkDialogState extends State<LinkDialog> {
                 key2 = null;
               }),
             ),
-            // 选择Sheet2
-            if (file2 != null && sheets2.isNotEmpty)
-              DropdownButtonFormField<String>(
-                decoration: const InputDecoration(labelText: 'Sheet2'),
-                value: table2,
-                items: sheets2.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-                onChanged: (v) => setState(() {
-                  table2 = v;
-                  key2 = null;
-                }),
-              ),
+            // 选择Sheet2 - 始终显示（如果选择了文件）
+            if (file2 != null) ...[
+              if (sheets2.isNotEmpty)
+                DropdownButtonFormField<String>(
+                  decoration: const InputDecoration(labelText: 'Sheet2'),
+                  value: table2,
+                  items: sheets2.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                  onChanged: (v) => setState(() {
+                    table2 = v;
+                    key2 = null;
+                  }),
+                )
+              else
+                const Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: Text('⚠️ 请重新选择文件', style: TextStyle(color: Colors.red)),
+                ),
+            ],
             // 选择字段2
             if (file2 != null && table2 != null && fields2.isNotEmpty)
               DropdownButtonFormField<String>(
@@ -591,11 +600,6 @@ class _LinkDialogState extends State<LinkDialog> {
                   value: h, child: Text(h, overflow: TextOverflow.ellipsis),
                 )).toList(),
                 onChanged: (v) => setState(() => key2 = v),
-              ),
-            if (file2 != null && table2 != null && fields2.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(8.0),
-                child: Text('该Sheet无字段', style: TextStyle(color: Colors.orange)),
               ),
           ],
         ),
