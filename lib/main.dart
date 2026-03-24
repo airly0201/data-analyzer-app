@@ -532,7 +532,7 @@ class _LinkDialogState extends State<LinkDialog> {
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: 'Sheet1'),
                 value: table1,
-                items: sheets1.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                items: sheets1.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
                 onChanged: (v) => setState(() {
                   table1 = v;
                   key1 = null;
@@ -576,7 +576,7 @@ class _LinkDialogState extends State<LinkDialog> {
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: 'Sheet2'),
                 value: table2,
-                items: sheets2.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                items: sheets2.map<DropdownMenuItem<String>>((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
                 onChanged: (v) => setState(() {
                   table2 = v;
                   key2 = null;
