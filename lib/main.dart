@@ -619,17 +619,3 @@ class _LinkDialogState extends State<LinkDialog> {
     );
   }
 }
-            if (file1 != null && file2 != null && table1 != null && table2 != null && key1 != null && key2 != null) {
-              widget.onAdd({
-                'file1': file1!, 'table1': table1!, 'key1': key1!,
-                'file2': file2!, 'table2': table2!, 'key2': key2!,
-              });
-              Navigator.pop(context);
-            }
-          },
-          child: const Text('添加'),
-        ),
-      ],
-    );
-  }
-}
