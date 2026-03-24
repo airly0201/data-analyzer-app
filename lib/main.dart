@@ -30,9 +30,9 @@ class DataAnalyzerApp extends StatelessWidget {
 class AppState {
   String folderPath = '';
   List<String> files = [];
-  Map<String, List<String>> tables = {}; // 文件 -> 表名列表
+  Map<String, List<String>> tables = {}; // 文件 -> sheet列表
+  Map<String, Map<String, List<String>>> sheetFields = {}; // 文件 -> {sheet名: 字段列表}
   List<Map<String, String>> links = []; // 关联配置
-  Map<String, List<String>> outputFields = {}; // 输出字段
   Map<String, dynamic>? queryResult;
   String? selectedConfig;
   String status = '请选择数据目录';
@@ -41,8 +41,8 @@ class AppState {
     'folderPath': folderPath,
     'files': files,
     'tables': tables,
+    'sheetFields': sheetFields.map((k, v) => MapEntry(k, v)),
     'links': links,
-    'outputFields': outputFields,
     'selectedConfig': selectedConfig,
   };
 
@@ -52,10 +52,12 @@ class AppState {
     tables = (json['tables'] as Map<String, dynamic>?)?.map(
       (k, v) => MapEntry(k, List<String>.from(v)),
     ) ?? {};
-    links = (json['links'] as List?)?.cast<Map<String, String>>() ?? [];
-    outputFields = (json['outputFields'] as Map<String, dynamic>?)?.map(
-      (k, v) => MapEntry(k, List<String>.from(v)),
+    sheetFields = (json['sheetFields'] as Map<String, dynamic>?)?.map(
+      (k, v) => MapEntry(k, (v as Map<String, dynamic>).map(
+        (sk, sv) => MapEntry(sk, List<String>.from(sv)),
+      )),
     ) ?? {};
+    links = (json['links'] as List?)?.cast<Map<String, String>>() ?? [];
     selectedConfig = json['selectedConfig'];
   }
 }
@@ -149,6 +151,7 @@ class _HomePageState extends State<HomePage> {
     _updateStatus('扫描中...');
     
     _state.tables = {};
+    _state.sheetFields = {};
     
     for (final filePath in _state.files) {
       try {
@@ -156,25 +159,29 @@ class _HomePageState extends State<HomePage> {
         final bytes = await file.readAsBytes();
         final excel = Excel.decodeBytes(bytes);
         
-        // 获取第一个sheet的表头
-        final tables = excel.tables.keys.toList();
-        _state.tables[filePath] = tables;
+        // 获取所有sheet名
+        final sheets = excel.tables.keys.toList();
+        _state.tables[filePath] = sheets;
         
-        // 尝试读取表头字段
-        if (tables.isNotEmpty) {
-          final sheet = excel.tables[tables.first];
+        // 读取每个sheet的字段
+        final fieldsMap = <String, List<String>>{};
+        for (final sheetName in sheets) {
+          final sheet = excel.tables[sheetName];
           if (sheet != null && sheet.rows.isNotEmpty) {
             final headers = sheet.rows.first
                 .map((c) => c?.value?.toString() ?? '')
                 .where((s) => s.isNotEmpty)
                 .toList();
-            // 保存到outputFields作为字段列表
-            _state.outputFields[filePath] = headers;
+            fieldsMap[sheetName] = headers;
+          } else {
+            fieldsMap[sheetName] = [];
           }
         }
+        _state.sheetFields[filePath] = fieldsMap;
+        
       } catch (e) {
         _state.tables[filePath] = [];
-        _state.outputFields[filePath] = [];
+        _state.sheetFields[filePath] = {};
       }
     }
     
@@ -194,7 +201,7 @@ class _HomePageState extends State<HomePage> {
       builder: (ctx) => LinkDialog(
         files: _state.files,
         tables: _state.tables,
-        headers: _state.outputFields,
+        sheetFields: _state.sheetFields,
         onAdd: (link) {
           setState(() {
             _state.links.add(link);
@@ -465,18 +472,18 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-// 关联配置对话框 - 让用户选择字段
+// 关联配置对话框 - 支持多sheet，选择sheet后显示字段
 class LinkDialog extends StatefulWidget {
   final List<String> files;
-  final Map<String, List<String>> tables;
-  final Map<String, List<String>> headers;  // 文件 -> 字段列表
+  final Map<String, List<String>> tables;  // 文件 -> [sheet1, sheet2, ...]
+  final Map<String, Map<String, List<String>>> sheetFields;  // 文件 -> {sheet: [字段...]}
   final Function(Map<String, String>) onAdd;
 
   const LinkDialog({
     super.key, 
     required this.files, 
     required this.tables, 
-    required this.headers,
+    required this.sheetFields,
     required this.onAdd
   });
 
@@ -491,8 +498,15 @@ class _LinkDialogState extends State<LinkDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final fields1 = file1 != null ? (widget.headers[file1] ?? []) : [];
-    final fields2 = file2 != null ? (widget.headers[file2] ?? []) : [];
+    // 获取文件1的sheet列表和字段
+    final sheets1 = file1 != null ? (widget.tables[file1] ?? []) : [];
+    final fields1 = (file1 != null && table1 != null) 
+        ? (widget.sheetFields[file1]?[table1] ?? []) : [];
+    
+    // 获取文件2的sheet列表和字段
+    final sheets2 = file2 != null ? (widget.tables[file2] ?? []) : [];
+    final fields2 = (file2 != null && table2 != null) 
+        ? (widget.sheetFields[file2]?[table2] ?? []) : [];
 
     return AlertDialog(
       title: const Text('添加关联'),
@@ -500,12 +514,12 @@ class _LinkDialogState extends State<LinkDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 文件1
+            // ===== 文件1 =====
             DropdownButtonFormField<String>(
               decoration: const InputDecoration(labelText: '文件1'),
               value: file1,
               items: widget.files.map((f) => DropdownMenuItem(
-                value: f, child: Text(f.split('/').last),
+                value: f, child: Text(f.split('/').last, overflow: TextOverflow.ellipsis),
               )).toList(),
               onChanged: (v) => setState(() {
                 file1 = v;
@@ -513,50 +527,75 @@ class _LinkDialogState extends State<LinkDialog> {
                 key1 = null;
               }),
             ),
-            // 字段1 - 下拉选择
-            if (file1 != null && fields1.isNotEmpty)
+            // 选择Sheet1
+            if (file1 != null && sheets1.isNotEmpty)
+              DropdownButtonFormField<String>(
+                decoration: const InputDecoration(labelText: 'Sheet1'),
+                value: table1,
+                items: sheets1.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                onChanged: (v) => setState(() {
+                  table1 = v;
+                  key1 = null;
+                }),
+              ),
+            // 选择字段1
+            if (file1 != null && table1 != null && fields1.isNotEmpty)
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: '关联字段1'),
                 value: key1,
                 items: fields1.map<DropdownMenuItem<String>>((h) => DropdownMenuItem(
-                  value: h, child: Text(h),
+                  value: h, child: Text(h, overflow: TextOverflow.ellipsis),
                 )).toList(),
                 onChanged: (v) => setState(() => key1 = v),
               ),
-            if (file1 != null && fields1.isEmpty)
+            if (file1 != null && table1 != null && fields1.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(8.0),
-                child: Text('无法读取字段', style: TextStyle(color: Colors.red)),
+                child: Text('该Sheet无字段', style: TextStyle(color: Colors.orange)),
               ),
-            const SizedBox(height: 16),
-            const Center(child: Text('=', style: TextStyle(fontSize: 24))),
-            const SizedBox(height: 16),
-            // 文件2
+            
+            const SizedBox(height: 12),
+            const Center(child: Text('=', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
+            const SizedBox(height: 12),
+            
+            // ===== 文件2 =====
             DropdownButtonFormField<String>(
               decoration: const InputDecoration(labelText: '文件2'),
               value: file2,
               items: widget.files.map((f) => DropdownMenuItem(
-                value: f, child: Text(f.split('/').last),
+                value: f, child: Text(f.split('/').last, overflow: TextOverflow.ellipsis),
               )).toList(),
               onChanged: (v) => setState(() {
                 file2 = v;
+                table2 = null;
                 key2 = null;
               }),
             ),
-            // 字段2 - 下拉选择
-            if (file2 != null && fields2.isNotEmpty)
+            // 选择Sheet2
+            if (file2 != null && sheets2.isNotEmpty)
+              DropdownButtonFormField<String>(
+                decoration: const InputDecoration(labelText: 'Sheet2'),
+                value: table2,
+                items: sheets2.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                onChanged: (v) => setState(() {
+                  table2 = v;
+                  key2 = null;
+                }),
+              ),
+            // 选择字段2
+            if (file2 != null && table2 != null && fields2.isNotEmpty)
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: '关联字段2'),
                 value: key2,
                 items: fields2.map<DropdownMenuItem<String>>((h) => DropdownMenuItem(
-                  value: h, child: Text(h),
+                  value: h, child: Text(h, overflow: TextOverflow.ellipsis),
                 )).toList(),
                 onChanged: (v) => setState(() => key2 = v),
               ),
-            if (file2 != null && fields2.isEmpty)
+            if (file2 != null && table2 != null && fields2.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(8.0),
-                child: Text('无法读取字段', style: TextStyle(color: Colors.red)),
+                child: Text('该Sheet无字段', style: TextStyle(color: Colors.orange)),
               ),
           ],
         ),
@@ -565,6 +604,21 @@ class _LinkDialogState extends State<LinkDialog> {
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
         TextButton(
           onPressed: () {
+            if (file1 != null && table1 != null && key1 != null &&
+                file2 != null && table2 != null && key2 != null) {
+              widget.onAdd({
+                'file1': file1!, 'table1': table1!, 'key1': key1!,
+                'file2': file2!, 'table2': table2!, 'key2': key2!,
+              });
+              Navigator.pop(context);
+            }
+          },
+          child: const Text('添加'),
+        ),
+      ],
+    );
+  }
+}
             if (file1 != null && file2 != null && table1 != null && table2 != null && key1 != null && key2 != null) {
               widget.onAdd({
                 'file1': file1!, 'table1': table1!, 'key1': key1!,
