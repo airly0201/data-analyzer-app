@@ -373,14 +373,7 @@ class _HomePageState extends State<HomePage> {
             ElevatedButton.icon(
               onPressed: _selectFolder,
               icon: const Icon(Icons.folder),
-              label: const Text('选择数据目录'),
-            ),
-            const SizedBox(height: 8),
-            
-            ElevatedButton.icon(
-              onPressed: _state.files.isNotEmpty ? _scanFiles : null,
-              icon: const Icon(Icons.search),
-              label: const Text('扫描文件'),
+              label: const Text('选择Excel文件'),
             ),
             const SizedBox(height: 8),
             
@@ -525,7 +518,7 @@ class _LinkDialogState extends State<LinkDialog> {
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: '关联字段1'),
                 value: key1,
-                items: fields1.map((h) => DropdownMenuItem(
+                items: fields1.map<DropdownMenuItem<String>>((h) => DropdownMenuItem(
                   value: h, child: Text(h),
                 )).toList(),
                 onChanged: (v) => setState(() => key1 = v),
@@ -555,7 +548,7 @@ class _LinkDialogState extends State<LinkDialog> {
               DropdownButtonFormField<String>(
                 decoration: const InputDecoration(labelText: '关联字段2'),
                 value: key2,
-                items: fields2.map((h) => DropdownMenuItem(
+                items: fields2.map<DropdownMenuItem<String>>((h) => DropdownMenuItem(
                   value: h, child: Text(h),
                 )).toList(),
                 onChanged: (v) => setState(() => key2 = v),
