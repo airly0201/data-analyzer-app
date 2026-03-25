@@ -32,6 +32,7 @@ class AppState {
   List<String> files = [];
   Map<String, List<String>> tables = {}; // 文件 -> sheet列表
   Map<String, Map<String, List<String>>> sheetFields = {}; // 文件 -> {sheet名: 字段列表}
+  Map<String, List<int>> fileBytes = {}; // 文件名 -> bytes内容
   List<Map<String, String>> links = []; // 关联配置
   Map<String, dynamic>? queryResult;
   String? selectedConfig;
@@ -115,53 +116,57 @@ class _HomePageState extends State<HomePage> {
   }
 
   // 选择目录
-  // 选择文件（直接选择Excel文件，不扫描目录）
+  // 选择文件 - 使用bytes模式直接读取内容
   Future<void> _selectFolder() async {
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['xlsx', 'xls'],
         allowMultiple: true,
+        withData: true,  // 关键：同时获取文件内容
       );
       
       if (result != null && result.files.isNotEmpty) {
-        // 获取文件路径
-        final validFiles = result.files.where((f) => f.path != null).map((f) => f.path!).toList();
+        // 获取文件（有内容的）
+        final validFiles = result.files.where((f) => f.bytes != null).toList();
         
         if (validFiles.isEmpty) {
-          _updateStatus('无法访问文件路径，请授予存储权限');
+          _updateStatus('无法读取文件内容，请重新选择');
           return;
         }
         
-        _state.files = validFiles;
-        _state.folderPath = '已选择文件';
-        _updateStatus('已选择 ${_state.files.length} 个文件');
+        _state.files = validFiles.map((f) => f.name).toList();  // 用文件名作为key
         
-        // 扫描每个文件的表
-        await _scanTables();
+        // 直接用bytes解析Excel
+        await _scanTablesFromBytes(validFiles);
+        
+        _updateStatus('已选择 ${_state.files.length} 个文件');
       }
     } catch (e) {
       _updateStatus('选择失败: $e');
     }
   }
 
-  // 扫描文件表头
-  Future<void> _scanTables() async {
+  // 直接从bytes扫描表
+  Future<void> _scanTablesFromBytes(List<PlatformFile> files) async {
     setState(() => _isLoading = true);
     _updateStatus('扫描中...');
     
     _state.tables = {};
     _state.sheetFields = {};
+    _state.fileBytes = {};
     
-    for (final filePath in _state.files) {
+    for (final file in files) {
+      final fileName = file.name;
       try {
-        final file = File(filePath);
-        final bytes = await file.readAsBytes();
+        final bytes = file.bytes!;
+        _state.fileBytes[fileName] = bytes;  // 保存bytes
+        
         final excel = Excel.decodeBytes(bytes);
         
         // 获取所有sheet名
         final sheets = excel.tables.keys.toList();
-        _state.tables[filePath] = sheets;
+        _state.tables[fileName] = sheets;
         
         // 读取每个sheet的字段
         final fieldsMap = <String, List<String>>{};
@@ -177,11 +182,11 @@ class _HomePageState extends State<HomePage> {
             fieldsMap[sheetName] = [];
           }
         }
-        _state.sheetFields[filePath] = fieldsMap;
+        _state.sheetFields[fileName] = fieldsMap;
         
       } catch (e) {
-        _state.tables[filePath] = [];
-        _state.sheetFields[filePath] = {};
+        _state.tables[fileName] = [];
+        _state.sheetFields[fileName] = {};
       }
     }
     
@@ -252,10 +257,13 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isLoading = false);
   }
 
-  // 读取Excel
-  Future<List<Map<String, dynamic>>> _readExcel(String filePath, String tableName) async {
-    final file = File(filePath);
-    final bytes = await file.readAsBytes();
+  // 读取Excel - 使用内存中的bytes
+  Future<List<Map<String, dynamic>>> _readExcel(String fileName, String tableName) async {
+    final bytes = _state.fileBytes[fileName];
+    if (bytes == null) {
+      throw Exception('找不到文件: $fileName');
+    }
+    
     final excel = Excel.decodeBytes(bytes);
     final sheet = excel.tables[tableName];
     
@@ -413,12 +421,13 @@ class _HomePageState extends State<HomePage> {
                 child: ListView.builder(
                   itemCount: _state.files.length,
                   itemBuilder: (ctx, i) {
-                    final fileName = _state.files[i].split('/').last;
+                    final fileName = _state.files[i];  // 现在直接是文件名
+                    final sheets = _state.tables[fileName] ?? [];
                     return ListTile(
                       dense: true,
                       leading: const Icon(Icons.description),
                       title: Text(fileName),
-                      subtitle: Text('表: ${_state.tables[_state.files[i]]?.join(", ") ?? "无"}'),
+                      subtitle: Text('Sheet: ${sheets.isEmpty ? "读取中..." : sheets.join(", ")}'),
                     );
                   },
                 ),
@@ -431,7 +440,7 @@ class _HomePageState extends State<HomePage> {
               ..._state.links.asMap().entries.map((e) => ListTile(
                 dense: true,
                 leading: const Icon(Icons.link),
-                title: Text('${e.value['file1']?.split('/').last}.${e.value['table1']} [${e.value['key1']}] = ${e.value['file2']?.split('/').last}.${e.value['table2']} [${e.value['key2']}]'),
+                title: Text('${e.value['file1']}.${e.value['table1']}[${e.value['key1']}] = ${e.value['file2']}.${e.value['table2']}[${e.value['key2']}]'),
               )),
             ],
 
